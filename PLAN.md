@@ -97,7 +97,7 @@ never in this repo.
 - `savesync games` table across both devices, built from the per-device summaries in Drive.
 - Real transfers verified byte for byte: Deck→PC and PC→Deck (Orc Incremental), and PC→Deck into a never-launched prefix (Dressmaker; the user confirmed the progress was there).
 - Tests:
-  - The decision table (`syncer/decide_test.go`, 15 cases).
+  - The decision table (`syncer/decide_test.go`, 14 cases).
   - Redirects, `Verify` (also run against all real PC backups), name cleaning, folder detection.
 
 ## Open bugs (do these first)
