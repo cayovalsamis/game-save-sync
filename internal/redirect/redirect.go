@@ -4,8 +4,11 @@ package redirect
 
 import (
 	"bytes"
+	"crypto/sha1"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -75,7 +78,9 @@ type mappingBackup struct {
 
 // Mapping is the parsed mapping.yaml of one game's backup folder.
 type Mapping struct {
-	Backups []mappingBackup `yaml:"backups"`
+	// Drives maps a storage folder ("drive-C") to the path prefix it holds ("C:").
+	Drives  map[string]string `yaml:"drives"`
+	Backups []mappingBackup   `yaml:"backups"`
 }
 
 func ReadMapping(mappingFile string) (*Mapping, error) {
@@ -104,6 +109,94 @@ func (m *Mapping) Paths() []string {
 		}
 	}
 	return paths
+}
+
+// Verify checks that every file of the named backup is present in
+// backupDir with the recorded size and content. A download taken while the
+// other device is still uploading fails this check.
+func (m *Mapping) Verify(backupDir, name string) error {
+	var full mappingBackup
+	child := ""
+	found := false
+	for _, b := range m.Backups {
+		if b.Name == name {
+			full, found = b, true
+		}
+		for _, c := range b.Children {
+			if c.Name == name {
+				full, child, found = b, c.Name, true
+			}
+		}
+	}
+	if !found {
+		return fmt.Errorf("backup %s is not listed", name)
+	}
+	if _, err := os.Stat(filepath.Join(backupDir, full.Name+".zip")); err == nil {
+		return nil // zip backups are written whole; nothing to cross-check cheaply
+	}
+	stored := map[string]string{} // path -> backup folder holding it
+	for p := range full.Files {
+		stored[p] = full.Name
+	}
+	if child != "" {
+		for _, c := range full.Children {
+			if c.Name == child {
+				for p := range c.Files {
+					stored[p] = child
+				}
+			}
+		}
+	}
+	files, _ := m.FilesOf(name)
+	for p, f := range files {
+		local, err := m.storedPath(backupDir, stored[p], p)
+		if err != nil {
+			return err
+		}
+		info, err := os.Stat(local)
+		if err != nil {
+			return fmt.Errorf("%s is missing from the downloaded backup", p)
+		}
+		if info.Size() != f.Size {
+			return fmt.Errorf("%s is incomplete in the downloaded backup", p)
+		}
+		if f.Hash != "" {
+			if hash, err := SHA1File(local); err != nil || hash != f.Hash {
+				return fmt.Errorf("%s does not match its recorded hash", p)
+			}
+		}
+	}
+	return nil
+}
+
+// storedPath finds where Ludusavi keeps the backed-up file p:
+// <backupDir>/<backup>/<drive folder>/<rest of p>.
+func (m *Mapping) storedPath(backupDir, backup, p string) (string, error) {
+	bestKey, bestLen := "", -1
+	for key, prefix := range m.Drives {
+		if strings.HasPrefix(p, prefix) && len(prefix) > bestLen {
+			bestKey, bestLen = key, len(prefix)
+		}
+	}
+	if bestLen < 0 {
+		return "", fmt.Errorf("no drive folder for %s", p)
+	}
+	rest := strings.TrimPrefix(p[bestLen:], "/")
+	return filepath.Join(backupDir, backup, bestKey, filepath.FromSlash(rest)), nil
+}
+
+// SHA1File hashes a file the way Ludusavi does in mapping.yaml.
+func SHA1File(p string) (string, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha1.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // FilesOf returns the files making up the named backup. A differential

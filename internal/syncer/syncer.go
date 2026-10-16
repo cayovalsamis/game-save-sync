@@ -239,6 +239,9 @@ func (s *Syncer) pull(title, head string, downloaded bool) error {
 	if err != nil {
 		return err
 	}
+	if err := mapping.Verify(backupPath, head); err != nil {
+		return fmt.Errorf("cloud copy not complete yet (the other device may still be uploading): %w", err)
+	}
 	rules, err := s.Paths.Rules(title)
 	if err != nil {
 		return err
@@ -309,7 +312,7 @@ func (s *Syncer) matchesBackup(title string, live Live, mappingFile, backup stri
 		if !ok {
 			return false, nil
 		}
-		hash, err := sha1File(lp)
+		hash, err := redirect.SHA1File(lp)
 		if err != nil || hash != f.Hash {
 			return false, err
 		}

@@ -55,3 +55,42 @@ func TestEnsureKeepsSpecificFirst(t *testing.T) {
 		t.Errorf("other settings changed:\n%s", s)
 	}
 }
+
+func TestVerify(t *testing.T) {
+	dir := t.TempDir()
+	mapping := `---
+name: Game
+drives:
+  drive-0: ""
+  drive-C: "C:"
+backups:
+  - name: backup-1
+    when: "2026-10-16T16:39:37Z"
+    os: windows
+    files:
+      C:/Users/Cayo/AppData/Roaming/Game/save.dat:
+        hash: a9993e364706816aba3e25717850c26c9cd0d89d
+        size: 3
+    children: []
+`
+	if err := os.WriteFile(filepath.Join(dir, "mapping.yaml"), []byte(mapping), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := ReadMapping(filepath.Join(dir, "mapping.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Verify(dir, "backup-1"); err == nil {
+		t.Fatal("Verify passed with the file missing")
+	}
+	stored := filepath.Join(dir, "backup-1", "drive-C", "Users", "Cayo", "AppData", "Roaming", "Game", "save.dat")
+	os.MkdirAll(filepath.Dir(stored), 0o755)
+	os.WriteFile(stored, []byte("ab"), 0o644)
+	if err := m.Verify(dir, "backup-1"); err == nil {
+		t.Fatal("Verify passed with a truncated file")
+	}
+	os.WriteFile(stored, []byte("abc"), 0o644) // sha1("abc") is the hash above
+	if err := m.Verify(dir, "backup-1"); err != nil {
+		t.Fatalf("Verify failed on a complete backup: %v", err)
+	}
+}
