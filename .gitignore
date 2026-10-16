@@ -1,0 +1,4 @@
+safety/
+*.log
+/bin/
+rclone.conf
