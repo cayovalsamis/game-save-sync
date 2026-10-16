@@ -4,10 +4,12 @@ package redirect
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -147,12 +149,7 @@ func Ensure(ludusaviConfigDir string, pairs []Pair) (int, error) {
 		return 0, fmt.Errorf("%s: unexpected layout", path)
 	}
 	root := doc.Content[0]
-	list := mapValue(root, "redirects")
-	if list == nil {
-		root.Content = append(root.Content, scalar("redirects"), &yaml.Node{Kind: yaml.SequenceNode})
-		list = root.Content[len(root.Content)-1]
-	}
-	list.Kind, list.Style, list.Tag = yaml.SequenceNode, 0, "!!seq"
+	list := ensureSeq(root, "redirects")
 
 	existing := map[string]bool{}
 	for _, item := range list.Content {
@@ -231,4 +228,128 @@ func Translate(rules []Rule, p string) string {
 		}
 	}
 	return p
+}
+
+// DeckRules translate Windows paths for one game on a Steam Deck: the
+// Windows user folder becomes the prefix's steamuser folder, the rest of
+// C: becomes the prefix's drive_c, and the PC's game folders become gamesRoot.
+func DeckRules(prefix, gamesRoot string, peerGamesRoots []string) []Rule {
+	prefix = strings.TrimRight(prefix, "/")
+	rules := []Rule{
+		{regexp.MustCompile(`^(C:/Users/Public)(/|$)`), prefix + "/drive_c/users/Public"},
+		{regexp.MustCompile(`^(C:/Users/[^/]+)(/|$)`), prefix + "/drive_c/users/steamuser"},
+		{regexp.MustCompile(`^(C:)(/|$)`), prefix + "/drive_c"},
+	}
+	for _, root := range peerGamesRoots {
+		rules = append(rules, Rule{regexp.MustCompile(`(?i)^(` + regexp.QuoteMeta(slash(root)) + `)(/|$)`), strings.TrimRight(gamesRoot, "/")})
+	}
+	return rules
+}
+
+// IsNative reports whether p is an absolute path on this OS, i.e. whether a
+// translated path can actually be restored here.
+func IsNative(p string) bool {
+	if runtime.GOOS == "windows" {
+		return len(p) >= 3 && p[1] == ':' && (p[2] == '/' || p[2] == '\\')
+	}
+	return strings.HasPrefix(p, "/")
+}
+
+// ErrUnplaced means a game has no location on this device yet (e.g. no
+// Steam shortcut, so no Proton prefix). Such games are skipped, not retried.
+var ErrUnplaced = errors.New("no place for this game's saves on this device")
+
+// Map tells the syncer where backed-up paths belong on this device.
+type Map interface {
+	// Rules translates backed-up paths of title into paths on this device.
+	Rules(title string) ([]Rule, error)
+	// Apply makes Ludusavi use pairs when it next restores title, and
+	// reports how many redirects were new.
+	Apply(title string, pairs []Pair) (int, error)
+}
+
+// Global keeps one set of rules for every game and stores redirects in
+// Ludusavi's own config. It suits Windows, where each Deck prefix has its
+// own unique source path.
+type Global struct {
+	All       []Rule
+	ConfigDir string
+}
+
+func (g Global) Rules(string) ([]Rule, error)              { return g.All, nil }
+func (g Global) Apply(_ string, pairs []Pair) (int, error) { return Ensure(g.ConfigDir, pairs) }
+
+// WriteManaged writes managedDir/config.yaml: a copy of baseDir's Ludusavi
+// config with extra Wine prefix roots and exactly the given restore
+// redirects. The Deck runs Ludusavi with --config managedDir, because the
+// same Windows path must go to a different prefix for each game.
+func WriteManaged(baseDir, managedDir string, winePrefixes []string, pairs []Pair) error {
+	raw, err := os.ReadFile(filepath.Join(baseDir, "config.yaml"))
+	if err != nil {
+		return err
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return err
+	}
+	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+		return errors.New("unexpected Ludusavi config layout")
+	}
+	root := doc.Content[0]
+
+	roots := ensureSeq(root, "roots")
+	have := map[string]bool{}
+	for _, item := range roots.Content {
+		if p := mapValue(item, "path"); p != nil {
+			have[strings.TrimRight(p.Value, "/")] = true
+		}
+	}
+	for _, p := range winePrefixes {
+		if !have[strings.TrimRight(p, "/")] {
+			roots.Content = append(roots.Content, &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				scalar("store"), scalar("otherWine"), scalar("path"), scalar(p),
+			}})
+		}
+	}
+
+	redirects := ensureSeq(root, "redirects")
+	redirects.Content = nil
+	sort.SliceStable(pairs, func(i, j int) bool { return len(pairs[i].Source) > len(pairs[j].Source) })
+	for _, p := range pairs {
+		redirects.Content = append(redirects.Content, &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+			scalar("kind"), scalar("restore"), scalar("source"), scalar(p.Source), scalar("target"), scalar(p.Target),
+		}})
+	}
+
+	if err := os.MkdirAll(managedDir, 0o755); err != nil {
+		return err
+	}
+	// Share the base manifest instead of downloading a second copy.
+	manifest := filepath.Join(managedDir, "manifest.yaml")
+	if _, err := os.Lstat(manifest); errors.Is(err, os.ErrNotExist) {
+		if err := os.Symlink(filepath.Join(baseDir, "manifest.yaml"), manifest); err != nil {
+			return err
+		}
+	}
+	var out bytes.Buffer
+	enc := yaml.NewEncoder(&out)
+	enc.SetIndent(2)
+	if err := enc.Encode(&doc); err != nil {
+		return err
+	}
+	tmp := filepath.Join(managedDir, "config.yaml.tmp")
+	if err := os.WriteFile(tmp, append([]byte("---\n"), out.Bytes()...), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(managedDir, "config.yaml"))
+}
+
+func ensureSeq(m *yaml.Node, key string) *yaml.Node {
+	seq := mapValue(m, key)
+	if seq == nil {
+		m.Content = append(m.Content, scalar(key), &yaml.Node{})
+		seq = m.Content[len(m.Content)-1]
+	}
+	seq.Kind, seq.Style, seq.Tag = yaml.SequenceNode, 0, "!!seq"
+	return seq
 }

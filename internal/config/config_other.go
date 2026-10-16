@@ -26,6 +26,7 @@ func platformDefaults(c *Config) {
 	c.DeviceName = "Steam Deck"
 	home, _ := os.UserHomeDir()
 	c.HomeDir = home
+	c.SteamRoot = filepath.Join(home, ".local", "share", "Steam")
 	if roots, _ := filepath.Glob("/run/media/deck/*/Games"); len(roots) > 0 {
 		c.GamesRoot = roots[0]
 	}
@@ -41,5 +42,5 @@ func platformDefaults(c *Config) {
 	if path, err := exec.LookPath("rclone"); err == nil {
 		c.Rclone = path
 	}
-	c.PeerGamesRoots = []string{}
+	c.PeerGamesRoots = []string{`G:/local_games`}
 }

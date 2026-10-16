@@ -22,3 +22,12 @@ func TestFolderUnder(t *testing.T) {
 		}
 	}
 }
+
+func TestUnixPath(t *testing.T) {
+	if got := unixPath(`Z:\run\media\deck\x\Games\Dressmaker\Dressmaker.exe`); got != "/run/media/deck/x/Games/Dressmaker/Dressmaker.exe" {
+		t.Errorf("unixPath = %q", got)
+	}
+	if got := unixPath("/usr/bin/flatpak"); got != "/usr/bin/flatpak" {
+		t.Errorf("unixPath changed a Linux path: %q", got)
+	}
+}

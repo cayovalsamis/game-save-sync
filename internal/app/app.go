@@ -30,6 +30,8 @@ type App struct {
 	Devices *cloud.Remote
 	State   *state.Store
 	Syncer  *syncer.Syncer
+
+	deck *deckMap // nil on Windows
 }
 
 func New(logger *log.Logger) (*App, error) {
@@ -45,34 +47,39 @@ func New(logger *log.Logger) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	lu := &ludusavi.Client{Exe: cfg.Ludusavi, Prefix: cfg.LudusaviArgs}
+	var paths redirect.Map
+	var deck *deckMap
+	if runtime.GOOS == "windows" {
+		paths = redirect.Global{All: redirect.WindowsRules(cfg.HomeDir, cfg.GamesRoot, cfg.PeerGamesRoots), ConfigDir: cfg.LudusaviConfigDir}
+	} else {
+		deck = &deckMap{cfg: cfg, managedDir: filepath.Join(dataDir, "ludusavi")}
+		if err := deck.write(nil); err != nil {
+			return nil, fmt.Errorf("prepare Ludusavi config: %w", err)
+		}
+		lu.Prefix = append(append([]string{}, cfg.LudusaviArgs...), "--config", deck.managedDir)
+		paths = deck
+	}
 	a := &App{
 		Cfg:     cfg,
 		DataDir: dataDir,
 		Log:     logger,
-		Lu:      &ludusavi.Client{Exe: cfg.Ludusavi, Prefix: cfg.LudusaviArgs},
+		Lu:      lu,
+		deck:    deck,
 		Cloud:   &cloud.Remote{Exe: cfg.Rclone, Args: cfg.RcloneArgs, Path: cfg.CloudPath},
 		Devices: &cloud.Remote{Exe: cfg.Rclone, Args: cfg.RcloneArgs, Path: cfg.DevicesPath},
 		State:   st,
 	}
 	a.Syncer = &syncer.Syncer{
-		Lu:                a.Lu,
-		Cloud:             a.Cloud,
-		State:             st,
-		Rules:             rules(cfg),
-		LudusaviConfigDir: cfg.LudusaviConfigDir,
-		ConflictDir:       filepath.Join(dataDir, "conflicts"),
-		Log:               logger,
-		IsRunning:         func(string) bool { return false },
+		Lu:          a.Lu,
+		Cloud:       a.Cloud,
+		State:       st,
+		Paths:       paths,
+		ConflictDir: filepath.Join(dataDir, "conflicts"),
+		Log:         logger,
+		IsRunning:   func(string) bool { return false },
 	}
 	return a, nil
-}
-
-func rules(cfg *config.Config) []redirect.Rule {
-	if runtime.GOOS == "windows" {
-		return redirect.WindowsRules(cfg.HomeDir, cfg.GamesRoot, cfg.PeerGamesRoots)
-	}
-	// The Deck's rules (Windows paths into each game's Proton prefix) come with the Deck side.
-	return nil
 }
 
 // Folders lists the game folders and their Ludusavi titles. Matches are
@@ -105,6 +112,11 @@ func (a *App) Folders(refresh bool) (map[string]state.Resolution, error) {
 		if _, ok := out[folder]; !ok {
 			delete(a.State.Folders, folder)
 			changed = true
+		}
+	}
+	if a.deck != nil {
+		if err := a.deck.refresh(out); err != nil {
+			return nil, err
 		}
 	}
 	if changed {

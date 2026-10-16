@@ -24,6 +24,7 @@ func platformDefaults(c *Config) {
 	if home, err := os.UserHomeDir(); err == nil {
 		c.HomeDir = filepath.ToSlash(home)
 	}
+	// The Deck's game folder, e.g. /run/media/deck/<sd card id>/Games; set it in config.json.
 	c.PeerGamesRoots = []string{}
 }
 

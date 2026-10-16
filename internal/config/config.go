@@ -36,6 +36,9 @@ type Config struct {
 	// HomeDir is this device's user profile, the target for the other
 	// device's Proton "steamuser" folder.
 	HomeDir string `json:"homeDir"`
+	// SteamRoot is the Steam install whose non-Steam shortcuts and Proton
+	// prefixes are used (Steam Deck only).
+	SteamRoot string `json:"steamRoot,omitempty"`
 	// PeerGamesRoots are the other device's game folders, redirected to GamesRoot.
 	PeerGamesRoots []string `json:"peerGamesRoots"`
 

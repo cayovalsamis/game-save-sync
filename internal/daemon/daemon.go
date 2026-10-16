@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cayovalsamis/game-save-sync/internal/app"
+	"github.com/cayovalsamis/game-save-sync/internal/instance"
 	"github.com/cayovalsamis/game-save-sync/internal/procwatch"
 	"github.com/cayovalsamis/game-save-sync/internal/state"
 	"github.com/cayovalsamis/game-save-sync/internal/syncer"
@@ -149,6 +150,12 @@ func (d *Daemon) refreshFolders() bool {
 // sync reconciles the given titles, skipping any that are running, and
 // publishes this device's summary. It reports whether everything succeeded.
 func (d *Daemon) sync(titles []string) bool {
+	release, err := instance.SyncLock(d.a.DataDir, 5*time.Minute)
+	if err != nil {
+		d.a.Log.Printf("sync skipped: %v", err)
+		return false
+	}
+	defer release()
 	skip := map[string]bool{}
 	for _, t := range titles {
 		if _, ok := d.running[d.byTitle[t]]; ok {

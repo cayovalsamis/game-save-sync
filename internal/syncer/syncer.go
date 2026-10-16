@@ -23,13 +23,12 @@ import (
 var ErrGameRunning = errors.New("game is running")
 
 type Syncer struct {
-	Lu                *ludusavi.Client
-	Cloud             *cloud.Remote
-	State             *state.Store
-	Rules             []redirect.Rule
-	LudusaviConfigDir string
-	ConflictDir       string
-	Log               *log.Logger
+	Lu          *ludusavi.Client
+	Cloud       *cloud.Remote
+	State       *state.Store
+	Paths       redirect.Map
+	ConflictDir string
+	Log         *log.Logger
 	// IsRunning is checked again right before a restore, since a sync can
 	// take a while and the game may have been launched in the meantime.
 	IsRunning func(title string) bool
@@ -58,7 +57,7 @@ func (s *Syncer) ReconcileAll(titles []string, skip map[string]bool) ([]Result, 
 	var results []Result
 	for _, title := range titles {
 		live := liveOf(scans[title])
-		if skip[title] {
+		if _, err := s.Paths.Rules(title); skip[title] || errors.Is(err, redirect.ErrUnplaced) {
 			lives[title] = live
 			continue
 		}
@@ -167,7 +166,7 @@ func (s *Syncer) resolveBoth(title string, live Live, head string) (string, erro
 	if err != nil {
 		return "", err
 	}
-	same, err := s.matchesBackup(live, filepath.Join(backupPath, "mapping.yaml"), head)
+	same, err := s.matchesBackup(title, live, filepath.Join(backupPath, "mapping.yaml"), head)
 	if err != nil {
 		s.Log.Printf("%s: could not compare with cloud (%v); treating as conflict", title, err)
 	}
@@ -240,7 +239,22 @@ func (s *Syncer) pull(title, head string, downloaded bool) error {
 	if err != nil {
 		return err
 	}
-	added, err := redirect.Ensure(s.LudusaviConfigDir, redirect.Needed(s.Rules, mapping.Paths()))
+	rules, err := s.Paths.Rules(title)
+	if err != nil {
+		return err
+	}
+	// Refuse to restore anything that would not land in a real path here,
+	// rather than letting Ludusavi write e.g. "C:/Users/..." on Linux.
+	files, ok := mapping.FilesOf(head)
+	if !ok {
+		return fmt.Errorf("backup %s missing from mapping.yaml", head)
+	}
+	for p := range files {
+		if !redirect.IsNative(redirect.Translate(rules, p)) {
+			return fmt.Errorf("no place on this device for %s; not restoring", p)
+		}
+	}
+	added, err := s.Paths.Apply(title, redirect.Needed(rules, mapping.Paths()))
 	if err != nil {
 		return fmt.Errorf("add redirects: %w", err)
 	}
@@ -273,7 +287,7 @@ func (s *Syncer) record(title, head, fingerprint string) {
 // matchesBackup reports whether every file in the named backup exists on
 // this device with the same content. Extra local files are allowed: games
 // often keep logs or caches that one device backed up and the other didn't.
-func (s *Syncer) matchesBackup(live Live, mappingFile, backup string) (bool, error) {
+func (s *Syncer) matchesBackup(title string, live Live, mappingFile, backup string) (bool, error) {
 	mapping, err := redirect.ReadMapping(mappingFile)
 	if err != nil {
 		return false, err
@@ -282,12 +296,16 @@ func (s *Syncer) matchesBackup(live Live, mappingFile, backup string) (bool, err
 	if !ok || len(files) == 0 {
 		return false, fmt.Errorf("backup %s not in %s", backup, mappingFile)
 	}
+	rules, err := s.Paths.Rules(title)
+	if err != nil {
+		return false, err
+	}
 	local := map[string]string{}
 	for _, p := range live.Files {
 		local[normPath(p)] = p
 	}
 	for p, f := range files {
-		lp, ok := local[normPath(redirect.Translate(s.Rules, p))]
+		lp, ok := local[normPath(redirect.Translate(rules, p))]
 		if !ok {
 			return false, nil
 		}

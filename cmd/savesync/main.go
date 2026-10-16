@@ -13,11 +13,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/cayovalsamis/game-save-sync/internal/app"
 	"github.com/cayovalsamis/game-save-sync/internal/config"
 	"github.com/cayovalsamis/game-save-sync/internal/daemon"
 	"github.com/cayovalsamis/game-save-sync/internal/instance"
+	"github.com/cayovalsamis/game-save-sync/internal/procwatch"
 )
 
 const usage = `usage: savesync <command> [options]
@@ -29,12 +31,14 @@ commands:
                      table) without syncing any saves
   sync               sync all games once, now, then exit
   run                run in the background: watch games and keep saves in sync
+  wrap -- <command>  sync one game, then start it (Steam launch options:
+                     /home/deck/.local/bin/savesync wrap -- %command%)
   config             print the config file location
 `
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprint(os.Stderr, usage)
+		io.WriteString(os.Stderr, usage)
 		os.Exit(2)
 	}
 	cmd, args := os.Args[1], os.Args[2:]
@@ -48,13 +52,15 @@ func main() {
 		err = syncOnce()
 	case "run":
 		err = run()
+	case "wrap":
+		err = wrap(args)
 	case "config":
 		var path string
 		if path, err = config.Path(); err == nil {
 			fmt.Println(path)
 		}
 	case "-h", "--help", "help":
-		fmt.Print(usage)
+		io.WriteString(os.Stdout, usage)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", cmd, usage)
 		os.Exit(2)
@@ -103,9 +109,11 @@ func syncOnce() error {
 	if err != nil {
 		return err
 	}
-	if err := instance.Lock(a.DataDir); err != nil {
-		return fmt.Errorf("%w; it syncs on its own, or stop it first", err)
+	release, err := instance.SyncLock(a.DataDir, 5*time.Minute)
+	if err != nil {
+		return err
 	}
+	defer release()
 	folders, err := a.Folders(false)
 	if err != nil {
 		return err
@@ -137,12 +145,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	logFile, err := openLog(filepath.Join(dataDir, "savesync.log"))
+	logger, closeLog, err := fileLogger("")
 	if err != nil {
 		return err
 	}
-	defer logFile.Close()
-	logger := log.New(io.MultiWriter(logFile, os.Stderr), "", log.LstdFlags)
+	defer closeLog()
 
 	if err := instance.Lock(dataDir); err != nil {
 		logger.Print(err)
@@ -156,6 +163,76 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return daemon.New(a).Run(ctx)
+}
+
+// wrap brings one game's save up to date, then replaces itself with the
+// game's launch command, so Steam tracks the game as usual. Sync problems
+// are logged but never stop the game from starting.
+func wrap(args []string) error {
+	if len(args) > 0 && args[0] == "--" {
+		args = args[1:]
+	}
+	if len(args) == 0 {
+		return errors.New("usage: savesync wrap -- <game command>")
+	}
+	if logger, closeLog, err := fileLogger("wrap: "); err == nil {
+		preLaunchSync(logger, args)
+		closeLog()
+	}
+	return execGame(args)
+}
+
+func preLaunchSync(logger *log.Logger, args []string) {
+	a, err := app.New(logger)
+	if err != nil {
+		logger.Print(err)
+		return
+	}
+	folder := procwatch.FolderOf(a.Cfg.GamesRoot, args)
+	if folder == "" {
+		logger.Printf("no game folder under %s in the launch command; starting without sync", a.Cfg.GamesRoot)
+		return
+	}
+	folders, err := a.Folders(false)
+	if err != nil {
+		logger.Print(err)
+		return
+	}
+	title := folders[folder].Title
+	if title == "" {
+		logger.Printf("%s: not matched to a Ludusavi title; starting without sync", folder)
+		return
+	}
+	release, err := instance.SyncLock(a.DataDir, 2*time.Minute)
+	if err != nil {
+		logger.Printf("%s: %v; starting without sync", title, err)
+		return
+	}
+	defer release()
+	start := time.Now()
+	results, _, err := a.Syncer.ReconcileAll([]string{title}, nil)
+	if err != nil {
+		logger.Printf("%s: sync before launch failed: %v", title, err)
+		return
+	}
+	for _, r := range results {
+		if r.Err != nil {
+			logger.Printf("%s: sync before launch failed: %v", title, r.Err)
+		}
+	}
+	logger.Printf("%s: checked before launch in %s", title, time.Since(start).Round(100*time.Millisecond))
+}
+
+func fileLogger(prefix string) (*log.Logger, func(), error) {
+	_, dataDir, err := config.Dirs()
+	if err != nil {
+		return nil, nil, err
+	}
+	f, err := openLog(filepath.Join(dataDir, "savesync.log"))
+	if err != nil {
+		return nil, nil, err
+	}
+	return log.New(io.MultiWriter(f, os.Stderr), prefix, log.LstdFlags), func() { f.Close() }, nil
 }
 
 // openLog appends to path, starting over (keeping one old file) past 5 MB.

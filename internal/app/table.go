@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/cayovalsamis/game-save-sync/internal/cloud"
 	"github.com/cayovalsamis/game-save-sync/internal/devices"
+	"github.com/cayovalsamis/game-save-sync/internal/redirect"
 )
 
 type row struct {
@@ -144,6 +146,9 @@ func (a *App) GamesTable(w io.Writer, refresh bool) error {
 func (a *App) status(title, fingerprint string, heads map[string]string, headsErr error) string {
 	st := a.State.Games[title]
 	head := heads[cloud.EscapeFolderName(title)]
+	if _, err := a.Syncer.Paths.Rules(title); errors.Is(err, redirect.ErrUnplaced) {
+		return "not synced (no Steam shortcut)"
+	}
 	switch {
 	case fingerprint == "" && head == "":
 		return "no saves yet"
