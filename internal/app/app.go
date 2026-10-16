@@ -85,10 +85,11 @@ func (a *App) Folders(refresh bool) (map[string]state.Resolution, error) {
 	out := map[string]state.Resolution{}
 	changed := false
 	for _, e := range entries {
-		if !e.IsDir() {
+		folder := e.Name()
+		// Skip hidden folders (e.g. leftovers from archive extraction) and lost+found.
+		if !e.IsDir() || strings.HasPrefix(folder, ".") || folder == "lost+found" {
 			continue
 		}
-		folder := e.Name()
 		res, cached := a.State.Folders[folder]
 		if _, overridden := a.Cfg.Overrides[folder]; refresh || !cached || overridden {
 			res, err = resolve.Folder(a.Lu, a.Cfg.GamesRoot, folder, a.Cfg.Overrides)
