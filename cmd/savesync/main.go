@@ -25,6 +25,8 @@ const usage = `usage: savesync <command> [options]
 commands:
   games [-refresh]   show every game folder on each device, its Ludusavi title,
                      newest save and sync status (-refresh re-matches all folders)
+  publish            upload this device's game list (for other devices' games
+                     table) without syncing any saves
   sync               sync all games once, now, then exit
   run                run in the background: watch games and keep saves in sync
   config             print the config file location
@@ -40,6 +42,8 @@ func main() {
 	switch cmd {
 	case "games":
 		err = games(args)
+	case "publish":
+		err = publish()
 	case "sync":
 		err = syncOnce()
 	case "run":
@@ -70,6 +74,27 @@ func games(args []string) error {
 		return err
 	}
 	return a.GamesTable(os.Stdout, *refresh)
+}
+
+func publish() error {
+	a, err := app.New(log.New(io.Discard, "", 0))
+	if err != nil {
+		return err
+	}
+	folders, err := a.Folders(false)
+	if err != nil {
+		return err
+	}
+	titles, _ := app.Titles(folders)
+	lives, err := a.Syncer.Lives(titles)
+	if err != nil {
+		return err
+	}
+	if err := a.PublishSummary(folders, lives); err != nil {
+		return err
+	}
+	fmt.Printf("published %d game folder(s) for %s\n", len(folders), a.Cfg.DeviceName)
+	return nil
 }
 
 func syncOnce() error {
